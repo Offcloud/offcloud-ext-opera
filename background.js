@@ -1,78 +1,98 @@
-var cm = chrome.contextMenus;
-var om = chrome.runtime.onMessage;
-var t = chrome.tabs;
 var remoteOptionId;
-var s = chrome.storage.local;
+var apiKey;
 
 var APIURLS = {
     instantDld: 'https://offcloud.com/api/instant/download',
     cloudDld: 'https://offcloud.com/api/cloud/download',
     remoteDld: 'https://offcloud.com/api/remote/download',
-    login: 'https://www.offcloud.com/login',
+    login: 'https://offcloud.com/login',
     checkLogin: 'https://offcloud.com/api/login/check',
     getRemoteId: 'https://offcloud.com/api/remote-account/list',
     remoteSet: 'https://www.offcloud.com/#/remote'
 };
+
+restoreOptions();
+
 initMenus();
-setRemoteAccount(false);
-function setRemoteAccount(ifCallBack, callback) {
-    $.get(APIURLS.getRemoteId, function (data) {
-        if (data && data[0] != "<") {
-            localStorage.remoteOptionId = remoteOptionId = data.data[0].remoteOptionId;
-            if (ifCallBack) {
-                callback(data.data[0].remoteOptionId);
-            }
-        } else if (data[0] == "<") {
-            showErrorMessage();
-            return false;
+
+function restoreOptions() {
+    chrome.storage.local.get(['apiKey', 'remoteOptionId'], function (object) {
+        if (object.apiKey != null)
+            apiKey = object.apiKey;
+
+        if (object.remoteOptionId != null)
+            remoteOptionId = object.remoteOptionId;
+    });
+}
+
+function getApiKey(callback) {
+    chrome.storage.local.get('apiKey', function (result) {
+        apiKey = result.apiKey;
+        if (apiKey == null) {
+            $.post('https://offcloud.com/api/account/get', function (data) {
+                if (data.error) {
+                    notifyNotLoggedIn();
+                } else {
+                    apiKey = data.apiKey;
+                    chrome.storage.local.set({
+                        apiKey: apiKey
+                    }, function () {
+                        setDefaultRemoteAccount(function () {
+                            callback();
+                        });
+                    });
+                }
+            });
         } else {
-            showNoRemoteSetNotify();
-            return false;
+            callback();
         }
     });
 }
 
-function checkRemoteSet() {
-    if (!remoteOptionId) {
-        showNoRemoteSetNotify();
-        return false;
-    }
+function setApiKey(newApiKey) {
+    chrome.storage.local.set({
+        apiKey: newApiKey
+    }, function () {
+        apiKey = newApiKey;
+        setDefaultRemoteAccount(()=> {
+        });
+    });
 }
 
-
 function initMenus() {
-    cm.removeAll();
-    cm.create({
+    chrome.contextMenus.removeAll();
+
+    chrome.contextMenus.create({
         type: "normal",
         title: "Instant download selected links",
         contexts: ["link", "selection"],
         onclick: function (clickData, tab) {
-            downloadAction(clickData, tab, APIURLS.instantDld, false);
+            downloadAction(clickData, tab, APIURLS.instantDld, false, 0);
         }
     });
-    cm.create({
+    chrome.contextMenus.create({
         type: "normal",
         title: "Cloud download selected links",
         contexts: ["link", "selection"],
         onclick: function (clickData, tab) {
-            downloadAction(clickData, tab, APIURLS.cloudDld, false);
+            downloadAction(clickData, tab, APIURLS.cloudDld, false, 1);
         }
     });
-    cm.create({
+    chrome.contextMenus.create({
         type: "normal",
         title: "Remote download selected links",
         contexts: ["link", "selection"],
         onclick: function (clickData, tab) {
-            downloadAction(clickData, tab, APIURLS.remoteDld, true);
+            downloadAction(clickData, tab, APIURLS.remoteDld, true, 2);
         }
-
-
     });
-    cm.create({
+
+    chrome.contextMenus.create({
         type: "separator",
         contexts: ["link", "selection"]
     });
-    cm.create({
+
+    chrome.contextMenus.create({
         type: "normal",
         title: "Instant download custom links",
         contexts: ["all"],
@@ -80,7 +100,7 @@ function initMenus() {
             customDownload(tab, 0);
         }
     });
-    cm.create({
+    chrome.contextMenus.create({
         type: "normal",
         title: "Cloud download custom links",
         contexts: ["all"],
@@ -88,7 +108,7 @@ function initMenus() {
             customDownload(tab, 1);
         }
     });
-    cm.create({
+    chrome.contextMenus.create({
         type: "normal",
         title: "Remote download custom links",
         contexts: ["all"],
@@ -99,90 +119,149 @@ function initMenus() {
 }
 
 function customDownload(tab, type) {
-    s.set({customType: type, showType: "custom"}, function () {
-        showModal(tab);
-    });
-}
-
-
-function downloadAction(clickData, tab, api, remote) {
-    if (clickData.linkUrl) {
+    if (apiKey == null) {
         checkLogin(function () {
-            processCall(api, clickData.linkUrl, remote, tab);
+            getApiKey(function () {
+                chrome.tabs.sendMessage(tab.id, {
+                    cmd: "showModal",
+                    type: type
+                });
+            });
         });
-    } else if (clickData.selectionText) {
-        t.sendMessage(tab.id, {cmd: "getSelectedHtml"}, function (resp) {
-            console.log(resp);
-            if (resp && resp.html) {
-                processMultipleLink(resp.html, true, remote, tab, api);
-            }
+    } else {
+        chrome.tabs.sendMessage(tab.id, {
+            cmd: "showModal",
+            type: type
         });
     }
 }
 
-function processMultipleLink(html, needReg, remote, tab, api) {
+function downloadAction(clickData, tab, apiLink, remote, type) {
+    if (apiKey == null) {
+        checkLogin(function () {
+            getApiKey(function () {
+                startAction();
+            });
+        });
+    } else {
+        startAction();
+    }
+
+    function startAction() {
+        apiLink += "?apiKey=" + apiKey;
+
+        chrome.tabs.sendMessage(tab.id, {
+            cmd: "appendLoader"
+        });
+
+        if (clickData.linkUrl) {
+            processCall(apiLink, clickData.linkUrl, remote, tab, type);
+        } else if (clickData.selectionText) {
+            chrome.tabs.sendMessage(tab.id, {
+                cmd: "getSelectedHtml"
+            }, function (resp) {
+                if (resp && resp.html) {
+                    processMultipleLink(resp.html, true, remote, tab, apiLink, resp.href, type);
+                }
+            });
+        }
+    }
+}
+
+function processMultipleLink(html, needReg, remote, tab, api, href, type) {
     var result = [];
     if (needReg) {
         result = findLinkByRegex(html);
     } else {
         result = findLinkByText(html);
     }
-    checkLogin(function () {
-        if (result && result.length > 1) {
-            var requestList = [];
-            for (var i = 0; i < result.length; i++) {
-                var dataBody = { url: result[i]};
-                if (remote) {
-                    checkRemoteSet();
-                    dataBody.remoteOptionId = remoteOptionId;
-                }
-                requestList.push($.ajax(api, {
-                    method: 'POST',
-                    data: dataBody
-                }).fail(function () {
-                    showErrorMessage();
-                }));
+
+    result = result.map(function (link) {
+        if (link.startsWith('http')) {
+            return link;
+        } else {
+            return href + link;
+        }
+    });
+
+    if (result && result.length > 1) {
+        var requestList = [];
+        for (var i = 0; i < result.length; i++) {
+            var dataBody = {
+                url: result[i]
+            };
+            if (remote) {
+                dataBody.remoteOptionId = remoteOptionId;
             }
-            var multiRequest = $.when.apply($, requestList);
-            multiRequest.done(function (data) {
-                var finalData = [];
-                $.each(arguments, function (index, responseData) {
-                    if (responseData[1] == "success") {
-                        if (responseData[0].not_available) {
-                            s.set({'result': responseData[0], isList: false, showType: "default"}, function () {
-                                showModal(tab);
+            requestList.push($.ajax(api, {
+                method: 'POST',
+                data: dataBody
+            }));
+        }
+        var multiRequest = $.when.apply($, requestList);
+        multiRequest.done(function (data) {
+            var finalData = [];
+            $.each(arguments, function (index, responseData) {
+                if (responseData[1] == "success") {
+                    if (responseData[0].not_available) {
+                        chrome.tabs.sendMessage(tab.id, {
+                            cmd: "errorNotification"
+                        });
+
+                        return false;
+                    } else {
+                        if (remote) {
+                            chrome.tabs.sendMessage(tab.id, {
+                                cmd: "remoteInProcessNotification"
                             });
                             return false;
                         } else {
-                            if (remote) {
-                                checkRemoteSet();
-                                s.set({'result': {remote: 'Transfer is in progress...'}, isList: false, showType: "default"}, function () {
-                                    showModal(tab);
-                                });
-                                return false;
-                            } else {
+                            if (!responseData[0].error)
                                 finalData.push(responseData[0].url);
-                            }
                         }
-                    } else {
-                        var data = {error: "unknown"};
-                        s.set({'result': data, isList: false, showType: "default"}, function () {
-                            showModal(tab);
-                        });
                     }
-                });
-
-                if (finalData.length != 0) {
-                    s.set({'result': finalData, isList: true, showType: "default"}, function () {
-                        showModal(tab);
+                } else {
+                    chrome.tabs.sendMessage(tab.id, {
+                        cmd: "errorNotification"
                     });
                 }
             });
-        } else if (result && result.length == 1) {
-            processCall(api, result[0], remote, tab);
-        }
 
-    });
+            if (finalData.length != 0) {
+                //copying the result to the clipboard
+                var text = finalData.join("\n");
+
+                chrome.tabs.sendMessage(tab.id, {
+                    cmd: "successNotification",
+                    text: text,
+                    type: type
+                }, function (res) {
+                    if (res) {
+                        finalData.forEach(function (url) {
+                            chrome.tabs.create({
+                                url: url
+                            });
+                        });
+                    }
+                });
+            }
+        });
+    } else if (result && result.length == 1) {
+        processCall(api, result[0], remote, tab, type);
+    }
+}
+
+function processCall(api, link, remote, tab, type) {
+    var dataBody = {
+        url: link
+    };
+    if (remote) {
+        dataBody.remoteOptionId = remoteOptionId;
+        processAjax(api, link, true, tab, dataBody, type);
+
+    } else {
+        processAjax(api, link, false, tab, dataBody, type);
+    }
 }
 
 function findLinkByRegex(html) {
@@ -199,125 +278,147 @@ function findLinkByText(text) {
     return text.match(urlReg);
 }
 
-function processCall(api, link, remote, tab) {
-    var dataBody = { url: link};
-    if (remote) {
-        if (!checkRemoteSet()) {
-            setRemoteAccount(true, function (rmtid) {
-                dataBody.remoteOptionId = rmtid;
-                processAjax(api, link, true, tab, dataBody);
-            });
-        } else {
-            dataBody.remoteOptionId = remoteOptionId;
-            processAjax(api, link, true, tab, dataBody);
-        }
-    } else {
-        processAjax(api, link, false, tab, dataBody);
-    }
-
-}
-
-function processAjax(api, link, remote, tab, dataBody) {
+function processAjax(api, link, remote, tab, dataBody, type) {
     $.ajax(api, {
         method: 'POST',
         data: dataBody
-//        'contentType': 'multipart/form-data'
-    }).success(function (data) {
+        //        'contentType': 'multipart/form-data'
+    }).done(function (data) {
         if (!data.not_available && remote) {
-            data = {remote: 'Transfer is in progress...'};
+            chrome.tabs.sendMessage(tab.id, {
+                cmd: "remoteInProcessNotification"
+            });
+        } else if (!data.not_available) {
+            var url = data.url;
+            if (url != null) {
+                chrome.tabs.sendMessage(tab.id, {
+                    cmd: "successNotification",
+                    text: url,
+                    type: type
+                }, function (res) {
+                    if (res) {
+                        chrome.tabs.create({
+                            url: url
+                        });
+                    }
+                });
+            } else {
+                chrome.tabs.sendMessage(tab.id, {
+                    cmd: "errorNotification"
+                });
+            }
+        } else {
+            chrome.tabs.sendMessage(tab.id, {
+                cmd: "errorNotification"
+            });
         }
-        s.set({'result': data, isList: false, showType: "default"}, function () {
-            showModal(tab);
-        });
     }).fail(function () {
-        var data = {error: "unknown"};
-        s.set({'result': data, isList: false, showType: "default"}, function () {
-            showModal(tab);
+        chrome.tabs.sendMessage(tab.id, {
+            cmd: "errorNotification"
         });
     });
 }
 
-function showModal(tab) {
-    t.executeScript(tab.id, {file: 'injectFrame.js'});
-}
-
-
 function checkLogin(callback) {
-    $.post(APIURLS.checkLogin, function (data) {
-        if (data.loggedIn != 1) {
-            notifyNotLogedIn();
-        } else {
+    $.get(APIURLS.checkLogin, function (response) {
+        var loggedIn = response.loggedIn;
+
+        if (loggedIn)
             callback();
-        }
+        else
+            notifyNotLoggedIn();
+
     }).fail(function () {
         showErrorMessage();
     });
 }
 
-om.addListener(function (req, sender, sendResponse) {
+function setDefaultRemoteAccount(callback) {
+    $.get(APIURLS.getRemoteId + "?apikey=" + apiKey, function (data) {
+        if (!data.error) {
+            var remoteOptionsArray = data.data;
+            if (remoteOptionsArray.length > 0)
+                remoteOptionId = remoteOptionsArray[0].remoteOptionId;
+            callback();
+        }
+    });
+}
+
+chrome.runtime.onMessage.addListener(function (req, sender, sendResponse) {
     var cmd = req.cmd;
-    if (cmd == "copy") {
-        var content = req.content;
-        copyTextToClipboard(content);
-        sendResponse({res: 'done'});
-    } else if (cmd == "removeFrame") {
-        t.executeScript(sender.tab.id, {code: 'document.body.removeChild(document.getElementById("momane_notifyFrame"))'});
-    } else if (cmd == "custom") {
-        t.executeScript(sender.tab.id, {code: 'document.body.removeChild(document.getElementById("momane_notifyFrame"))'});
+
+    if (req.action == "setApiKey")
+        setApiKey(req.newApiKey);
+
+    if (req.action == "setRemoteOptionId")
+        remoteOptionId = req.newRemoteOptionId;
+
+    if (req.action == "removeRemoteOptionId")
+        remoteOptionId = null;
+
+    if (cmd == "checkPageUrl") {
+        if (sender.url == sender.tab.url) {
+            sendResponse({
+                success: true
+            });
+        } else {
+            sendResponse({
+                success: false
+            });
+        }
+    }
+
+    if (cmd == "custom") {
         var currentApi;
-        if (req.remote == 0) {
+        if (req.type == 0) {
             currentApi = APIURLS.instantDld;
-        } else if (req.remote == 1) {
+        } else if (req.type == 1) {
             currentApi = APIURLS.cloudDld;
         } else {
             currentApi = APIURLS.remoteDld;
         }
-        processMultipleLink(req.html, false, req.remote == 2, sender.tab, currentApi);
+        currentApi += "?apiKey=" + apiKey;
+
+        chrome.tabs.sendMessage(sender.tab.id, {
+            cmd: "appendLoader"
+        });
+        processMultipleLink(req.html, false, req.type == 2, sender.tab, currentApi, null, req.type);
     }
 });
 
-function copyTextToClipboard(text) {
-    var copyFrom = $('<textarea id="testt"/>');
-    copyFrom.text(text);
-    $('body').append(copyFrom);
-    copyFrom.select();
-    document.execCommand('copy', true);
-    copyFrom.remove();
-}
-
 function showErrorMessage() {
-    showNotification(
-        { type: "basic",
-            title: ' Offcloud.com is offline',
-            message: 'Sorry, Offcloud.com is offline, please try again later'});
+    showNotification("errorMsg", {
+        type: "basic",
+        title: ' Offcloud.com is offline',
+        message: 'Sorry, Offcloud.com is offline, please try again later'
+    });
 }
 
-function notifyNotLogedIn() {
-    showNotification(
-        { type: "basic",
+function notifyNotLoggedIn() {
+    showNotification("notlogin", {
+            type: "basic",
             title: 'You are currently not logged in',
-            message: 'You are currently not logged into Offcloud. Please log into your account...'},
+            message: 'You are currently not logged into Offcloud. Please log into your account...'
+        },
         true,
         APIURLS.login);
 }
 
-function showNoRemoteSetNotify() {
-    showNotification(
-        {type: "basic",
-            title: "Remote Not Setted",
-            message: "Please set your remote download account first"},
-        true,
-        APIURLS.remoteSet);
-}
-
-function showNotification(options, redirect, redirectUrl) {
-    t.query({currentWindow: true, active: true}, function (tabs) {
-        s.set({'result': options, showType: "notify"}, function () {
-            showModal(tabs[0]);
+function showNotification(name, options, redirect, redirectUrl) {
+    chrome.notifications.clear(name, function () {
+        chrome.notifications.create(name, {
+            type: options.type,
+            iconUrl: 'icon64.png',
+            title: options.title,
+            message: options.message
+        }, function () {
             if (redirect) {
-                t.create({active: false, url: redirectUrl});
+                chrome.tabs.create({
+                    active: true,
+                    url: redirectUrl
+                });
             }
+
         });
     });
-
 }
